@@ -271,7 +271,7 @@ php artisan config:clear
 echo "==> [6/8] Migration + Seed (buddy:init-db)"
 php artisan storage:link || true
 until mysqladmin -h127.0.0.1 -u"${DB_USER}" -p"${DB_PASS}" ping --silent; do echo "DB wartet …"; sleep 2; done
-php artisan buddy:init-db --force --no-interaction
+php artisan buddy:init-db --no-interaction
 php artisan optimize:clear || true
 php artisan optimize || true
 

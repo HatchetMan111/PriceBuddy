@@ -44,7 +44,7 @@ pct enter <CTID>
 cd /opt/pricebuddy && git pull --ff-only \
   && composer install --no-dev --optimize-autoloader \
   && npm ci && npm run build \
-  && php artisan buddy:init-db --force \
+  && php artisan buddy:init-db \
   && php artisan optimize \
   && systemctl restart pricebuddy-queue
 ```
