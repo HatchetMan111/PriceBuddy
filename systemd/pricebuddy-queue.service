@@ -1,0 +1,15 @@
+[Unit]
+Description=PriceBuddy Queue Worker
+After=network-online.target mariadb.service
+Wants=network-online.target
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/pricebuddy
+ExecStart=/usr/bin/php /opt/pricebuddy/artisan queue:work --sleep=3 --tries=3 --max-time=3600
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

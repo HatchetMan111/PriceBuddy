@@ -1,0 +1,11 @@
+[Unit]
+Description=PriceBuddy Scheduler (run once)
+After=network-online.target mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/pricebuddy
+ExecStart=/usr/bin/php /opt/pricebuddy/artisan schedule:run

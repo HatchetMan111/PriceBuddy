@@ -1,0 +1,10 @@
+[Unit]
+Description=PriceBuddy Scheduler every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+Unit=pricebuddy-schedule.service
+
+[Install]
+WantedBy=timers.target
