@@ -17,7 +17,10 @@ set -euo pipefail
 # ---------------- Variablen (oben, Community-Scripts-konform) ----------------
 APP="pricebuddy"
 APP_NAME="PriceBuddy"
-HOSTNAME="${HOSTNAME:-pricebuddy}"
+# WICHTIG: eigene Variable – $HOSTNAME ist auf dem Proxmox-Host bereits
+# auf den Node-Namen gesetzt und darf nicht als CT-Name dienen.
+CT_HOSTNAME="${CT_HOSTNAME:-pricebuddy}"
+INSTALL_URL="https://raw.githubusercontent.com/HatchetMan111/PriceBuddy/main/install/pricebuddy.sh"
 REPO_URL="https://github.com/jez500/pricebuddy.git"
 REPO_BRANCH="main"
 APP_DIR="/opt/pricebuddy"
@@ -60,11 +63,12 @@ error_trap() {
   local ec=$? cmd="${BASH_COMMAND:-?}" line="${BASH_LINENO[0]:-?}"
   msg_error "FEHLER: Befehl '${cmd}' scheiterte mit Exit-Code ${ec} (Zeile ${line})."
   echo "--- Kontext ---" >&2
-  echo "APP=${APP} CTID=${CTID:-?} HOSTNAME=${HOSTNAME} TEMPLATE=${CT_TEMPLATE}" >&2
+  echo "APP=${APP} CTID=${CTID:-?} CT_HOSTNAME=${CT_HOSTNAME} TEMPLATE=${CT_TEMPLATE}" >&2
   echo "Bash-Version: ${BASH_VERSION}; Host: $(hostname 2>/dev/null || echo ?)" >&2
   echo "Letzte 30 Kernel-/Syslog-Zeilen (falls verfügbar):" >&2
   (dmesg 2>/dev/null | tail -n 30 || journalctl -n 30 --no-pager 2>/dev/null || echo "(kein Log verfügbar)") >&2
-  echo "Tipp: Re-run mit Debugging:  bash -x $0 ${*:-}   oder   DEBUG=1 $0" >&2
+  echo "Tipp: Re-run mit Debugging:" >&2
+  echo "  curl -fsSL ${INSTALL_URL} -o /tmp/pricebuddy-install.sh && bash -x /tmp/pricebuddy-install.sh" >&2
 }
 trap 'error_trap' ERR
 
@@ -72,9 +76,9 @@ usage() {
   cat <<EOF
 ${APP_NAME} Proxmox Installer (Community-Scripts-Stil)
 
-Verwendung: $0 [--ctid N] [--storage NAME] [--bridge vmbr0] [--debug]
+Verwendung: $0 [--ctid N] [--hostname NAME] [--storage NAME] [--bridge vmbr0] [--debug]
 
-Env-Overrides: CTID, CT_STORAGE, CT_BRIDGE, CT_CORES, CT_MEMORY, CT_DISK,
+Env-Overrides: CTID, CT_HOSTNAME, CT_STORAGE, CT_BRIDGE, CT_CORES, CT_MEMORY, CT_DISK,
   DB_NAME, DB_USER, DB_PASS, ADMIN_EMAIL, ADMIN_PASSWORD, DEBUG=1
 EOF
 }
@@ -82,6 +86,7 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --ctid) CTID="${2:?}"; shift 2;;
+    --hostname) CT_HOSTNAME="${2:?}"; shift 2;;
     --storage) CT_STORAGE="${2:?}"; shift 2;;
     --bridge) CT_BRIDGE="${2:?}"; shift 2;;
     --debug|-x) DEBUG=1; shift;;
@@ -97,15 +102,28 @@ command -v pct >/dev/null || { msg_error "pct nicht gefunden – kein Proxmox-Ho
 command -v pveam >/dev/null || { msg_error "pveam nicht gefunden."; exit 1; }
 if command -v pveversion >/dev/null; then msg_info "$(pveversion | head -n1)"; fi
 
+# Eine ID gilt als belegt, wenn ein LXC *oder* eine VM sie nutzt
+# (pct status sieht nur Container – eine QEMU-VM mit gleicher ID
+#  würde sonst erst bei pct create auffallen).
+id_in_use() {
+  local id="$1"
+  pct status "$id" >/dev/null 2>&1 && return 0
+  if command -v qm >/dev/null 2>&1; then
+    qm status "$id" >/dev/null 2>&1 && return 0
+  fi
+  [[ -e "/etc/pve/lxc/${id}.conf" ]] && return 0
+  [[ -e "/etc/pve/qemu-server/${id}.conf" ]] && return 0
+  return 1
+}
 next_ctid() {
   local id
   for id in $(seq 100 999); do
-    if ! pct status "$id" >/dev/null 2>&1; then echo "$id"; return 0; fi
+    if ! id_in_use "$id"; then echo "$id"; return 0; fi
   done
   msg_error "Keine freie CT-ID zwischen 100–999 gefunden."; return 1
 }
 if [[ -z "${CTID}" ]]; then CTID="$(next_ctid)"; msg_info "Nächste freie CT-ID: ${CTID}"; fi
-if pct status "${CTID}" >/dev/null 2>&1; then msg_error "CT ${CTID} existiert bereits. Andere --ctid wählen."; exit 1; fi
+if id_in_use "${CTID}"; then msg_error "ID ${CTID} ist bereits belegt (LXC oder VM). Andere --ctid wählen."; exit 1; fi
 
 msg_info "Stelle sicher, dass LXC-Template ${CT_TEMPLATE} vorhanden ist …"
 if ! pveam list "${CT_TEMPLATE_STORAGE}" 2>/dev/null | grep -q "${CT_TEMPLATE}"; then
@@ -116,9 +134,9 @@ fi
 msg_ok "Template bereit."
 
 # ---------------- Container erstellen ----------------
-msg_info "Erstelle LXC ${CTID} (${HOSTNAME}, ${CT_CORES} vCPU / ${CT_MEMORY} MB / ${CT_DISK} GB) …"
+msg_info "Erstelle LXC ${CTID} (${CT_HOSTNAME}, ${CT_CORES} vCPU / ${CT_MEMORY} MB / ${CT_DISK} GB) …"
 pct create "${CTID}" "${CT_TEMPLATE_STORAGE}:vztmpl/${CT_TEMPLATE}" \
-  --hostname "${HOSTNAME}" \
+  --hostname "${CT_HOSTNAME}" \
   --cores "${CT_CORES}" --memory "${CT_MEMORY}" --swap "${CT_SWAP}" \
   --rootfs "${CT_STORAGE}:${CT_DISK}" \
   --net0 "name=eth0,bridge=${CT_BRIDGE},ip=dhcp" \
@@ -353,7 +371,7 @@ ${GN}━━━━━━━━━━━━━━━━━━━━━━━━━
 ${GN}  ${APP_NAME} ist bereit!${CL}
 ${GN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}
   Web UI:      ${URL}
-  Container:   CT ${CTID} (${HOSTNAME}), onboot=1
+  Container:   CT ${CTID} (${CT_HOSTNAME}), onboot=1
   Login:       ${ADMIN_EMAIL} / ${ADMIN_PASSWORD}
                (sofort ändern!)
   DB im LXC:   ${DB_NAME} / User ${DB_USER}
