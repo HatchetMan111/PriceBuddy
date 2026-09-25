@@ -78,6 +78,10 @@ ${APP_NAME} Proxmox Installer (Community-Scripts-Stil)
 
 Verwendung: $0 [--ctid N] [--hostname NAME] [--storage NAME] [--bridge vmbr0] [--debug]
 
+  --ctid N:   ohne Angabe = nächste freie ID. Mit Angabe und existierendem
+             LXC wird das Setup darin fortgesetzt (idempotent, z. B. nach
+             abgebrochener Installation).
+
 Env-Overrides: CTID, CT_HOSTNAME, CT_STORAGE, CT_BRIDGE, CT_CORES, CT_MEMORY, CT_DISK,
   DB_NAME, DB_USER, DB_PASS, ADMIN_EMAIL, ADMIN_PASSWORD, DEBUG=1
 EOF
@@ -122,8 +126,17 @@ next_ctid() {
   done
   msg_error "Keine freie CT-ID zwischen 100–999 gefunden."; return 1
 }
-if [[ -z "${CTID}" ]]; then CTID="$(next_ctid)"; msg_info "Nächste freie CT-ID: ${CTID}"; fi
-if id_in_use "${CTID}"; then msg_error "ID ${CTID} ist bereits belegt (LXC oder VM). Andere --ctid wählen."; exit 1; fi
+if [[ -z "${CTID}" ]]; then CTID="$(next_ctid)"; msg_info "Nächste freie CT-ID: ${CTID}"; CTID_EXPLICIT=0; else CTID_EXPLICIT=1; fi
+REUSE=0
+if id_in_use "${CTID}"; then
+  if [[ "${CTID_EXPLICIT}" == "1" ]] && pct status "${CTID}" >/dev/null 2>&1; then
+    msg_info "CT ${CTID} existiert bereits als LXC – Setup wird darin fortgesetzt (idempotent)."
+    REUSE=1
+  else
+    msg_error "ID ${CTID} ist bereits belegt (LXC oder VM). Andere --ctid wählen."
+    exit 1
+  fi
+fi
 
 msg_info "Stelle sicher, dass LXC-Template ${CT_TEMPLATE} vorhanden ist …"
 if ! pveam list "${CT_TEMPLATE_STORAGE}" 2>/dev/null | grep -q "${CT_TEMPLATE}"; then
@@ -133,22 +146,30 @@ if ! pveam list "${CT_TEMPLATE_STORAGE}" 2>/dev/null | grep -q "${CT_TEMPLATE}";
 fi
 msg_ok "Template bereit."
 
-# ---------------- Container erstellen ----------------
-msg_info "Erstelle LXC ${CTID} (${CT_HOSTNAME}, ${CT_CORES} vCPU / ${CT_MEMORY} MB / ${CT_DISK} GB) …"
-pct create "${CTID}" "${CT_TEMPLATE_STORAGE}:vztmpl/${CT_TEMPLATE}" \
-  --hostname "${CT_HOSTNAME}" \
-  --cores "${CT_CORES}" --memory "${CT_MEMORY}" --swap "${CT_SWAP}" \
-  --rootfs "${CT_STORAGE}:${CT_DISK}" \
-  --net0 "name=eth0,bridge=${CT_BRIDGE},ip=dhcp" \
-  --unprivileged "${CT_UNPRIVILEGED}" \
-  --features "nesting=${CT_NESTING}" \
-  --onboot "${CT_ONBOOT}" \
-  --timezone "${CT_TIMEZONE}" \
-  --start 0
-msg_ok "Container erstellt."
+# ---------------- Container erstellen (oder wiederverwenden) ----------------
+if [[ "${REUSE}" == "0" ]]; then
+  msg_info "Erstelle LXC ${CTID} (${CT_HOSTNAME}, ${CT_CORES} vCPU / ${CT_MEMORY} MB / ${CT_DISK} GB) …"
+  pct create "${CTID}" "${CT_TEMPLATE_STORAGE}:vztmpl/${CT_TEMPLATE}" \
+    --hostname "${CT_HOSTNAME}" \
+    --cores "${CT_CORES}" --memory "${CT_MEMORY}" --swap "${CT_SWAP}" \
+    --rootfs "${CT_STORAGE}:${CT_DISK}" \
+    --net0 "name=eth0,bridge=${CT_BRIDGE},ip=dhcp" \
+    --unprivileged "${CT_UNPRIVILEGED}" \
+    --features "nesting=${CT_NESTING}" \
+    --onboot "${CT_ONBOOT}" \
+    --timezone "${CT_TIMEZONE}" \
+    --start 0
+  msg_ok "Container erstellt."
 
-pct set "${CTID}" --onboot 1
-pct start "${CTID}"
+  pct set "${CTID}" --onboot 1
+  pct start "${CTID}"
+else
+  pct set "${CTID}" --onboot 1
+  if ! pct status "${CTID}" 2>/dev/null | grep -q "running"; then
+    msg_info "Starte vorhandenen CT ${CTID} …"
+    pct start "${CTID}"
+  fi
+fi
 msg_info "Warte auf Container-Boot …"
 sleep 8
 for i in $(seq 1 30); do pct exec "${CTID}" -- true 2>/dev/null && break; sleep 2; done
@@ -160,6 +181,9 @@ msg_info "Installiere ${APP_NAME} in CT ${CTID} (das dauert einige Minuten) …"
 INNER_PAYLOAD="$(cat <<'INNER_EOF'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+# pct exec liefert ein minimales PATH (ohne /usr/local/bin) und keine Locale
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export LC_ALL=C.UTF-8 LANG=C.UTF-8
 APP_DIR="/opt/pricebuddy"; WEB_PORT="8080"
 DB_NAME="__DB_NAME__"; DB_USER="__DB_USER__"; DB_PASS="__DB_PASS__"
 ADMIN_EMAIL="__ADMIN_EMAIL__"; ADMIN_PASSWORD="__ADMIN_PASSWORD__"
@@ -187,11 +211,13 @@ apt-get install -y --no-install-recommends \
   php8.4-fpm php8.4-cli php8.4-mysql php8.4-xml php8.4-mbstring php8.4-curl \
   php8.4-zip php8.4-gd php8.4-intl php8.4-bcmath php8.4-redis php8.4-sqlite3 \
   nodejs
-# Composer (idempotent)
-if ! command -v composer >/dev/null 2>&1; then
+# Composer (idempotent; absoluter Pfad, da /usr/local/bin evtl. nicht im PATH war)
+if ! command -v composer >/dev/null 2>&1 && [ ! -x /usr/local/bin/composer ]; then
   curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 fi
-composer --version
+hash -r 2>/dev/null || true
+COMPOSER_BIN="$(command -v composer 2>/dev/null || echo /usr/local/bin/composer)"
+"${COMPOSER_BIN}" --version
 
 echo "==> [2/8] MariaDB starten + DB/User anlegen (idempotent)"
 systemctl enable --now mariadb
@@ -214,7 +240,7 @@ elif [ -d "${APP_DIR}" ] && [ -n "$(ls -A ${APP_DIR} 2>/dev/null)" ] && [ ! -d "
 echo "==> [4/8] PHP-Deps + Frontend-Build"
 cd "${APP_DIR}"
 mkdir -p storage/framework/sessions storage/framework/views storage/framework/testing storage/logs storage/app/public bootstrap/cache
-composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist
+"${COMPOSER_BIN}" install --no-dev --optimize-autoloader --no-interaction --prefer-dist
 npm ci --no-audit --no-fund || npm install --no-audit --no-fund
 npm run build
 
